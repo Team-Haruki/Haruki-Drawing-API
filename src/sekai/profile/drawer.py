@@ -329,6 +329,7 @@ _FRAME_SLOTS: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "tc": (0, 0, 50, 16),  # anchored top-left; x = _framePartsTopCenterXByFriend (ByRanking = 225)
         "bl": (0, 1, -8, -8),
         "br": (1, 1, 8, -8),
+        "bc": (0.5, 1, 0, -8),  # optional custom-frame ornament, never nine-sliced
     },
     # MultiLiveMatchingRoomPlayerCell / PlayerFrameSetting preview (PlayerFrameCell)
     "vertical": {
@@ -337,6 +338,7 @@ _FRAME_SLOTS: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "tc": (0.5, 0, 0, 32),
         "bl": (0, 1, -16, -8),
         "br": (1, 1, 16, -8),
+        "bc": (0.5, 1, 0, -8),
     },
 }
 # Reference cell sizes in UI units (prefab sizeDelta of the PlayerFrame*Cell roots).
@@ -453,17 +455,27 @@ async def get_player_frame_layers(frame_paths, cell: str = "horizontal") -> Play
             f"{dirs[1]}/{cell}/frame_base.png",
             *(f"{dirs[part]}/{cell}/frame_{name}.png" for part, name, _ in sprites),
         ]
+    # Custom assets may add this optional sibling without changing caller payloads.
+    # Game bundles keep their original prefab contract and incur no extra lookup.
+    bottom_path = (
+        paths[0].rsplit("/", 1)[0] + "/frame_centerbottom.png"
+        if paths[0].startswith("static_images/custom_frames/")
+        else None
+    )
+    loads = [get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise") for path in paths]
+    if bottom_path:
+        loads.append(get_optional_asset_image_ref(ASSETS_BASE_DIR, bottom_path))
     try:
-        sources = await asyncio.gather(
-            *(get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise") for path in paths)
-        )
+        loaded = await asyncio.gather(*loads)
+        sources = loaded[: len(paths)]
     except (OSError, ValueError):
         return None
     if any(isinstance(image, MissingImageRef) for image in sources):
         return None
-    return PlayerFrameLayers(
-        cell, sources[0], [(image, slot) for image, (_, _, slot) in zip(sources[1:], sprites, strict=True)]
-    )
+    ornaments = [(image, slot) for image, (_, _, slot) in zip(sources[1:], sprites, strict=True)]
+    if bottom_path and loaded[-1] is not None:
+        ornaments.append((loaded[-1], "bc"))
+    return PlayerFrameLayers(cell, sources[0], ornaments)
 
 
 class PlayerFrameBox(Widget):
@@ -534,7 +546,7 @@ class PlayerFrameBox(Widget):
             x = round(o + ax * w + ox * s - ax * dw)
             y = round(o + h - dh - oy * s) if ay else round(o - oy * s)
             src = (0, 0, iw, ih)
-            if self.split and slot != "tc":
+            if self.split and slot not in ("tc", "bc"):
                 # left-anchored strips stop at the centre line, right-anchored ones start there
                 if ax == 0 and x + dw > mid:
                     keep = max(0, round(mid) - x)
