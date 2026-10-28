@@ -14,7 +14,7 @@ ARG PYTHON_BUILD=cpython-3.14.3+freethreaded
 ARG VENV=/app/haruki_drawing_api/.venv
 ARG SITE_PACKAGES=/app/haruki_drawing_api/.venv/lib/python3.14t/site-packages
 
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 
 # ── Runtime base: system packages first, so they sit below everything that changes more often ──
 FROM debian:trixie-slim AS base
