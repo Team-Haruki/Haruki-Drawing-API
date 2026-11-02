@@ -22,7 +22,7 @@ dependencies = [
     "pjsekai-scores-rs>=0.6.0",
     "coloredlogs>=15.0.1",
     "opendal>=0.47.8,<0.48",
-    "asyncpg>=0.31.0,<0.32",
+    "asyncpg>=0.31.0,<0.33",
 ]
 
 [project.urls]
