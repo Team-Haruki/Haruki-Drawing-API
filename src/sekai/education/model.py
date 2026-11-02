@@ -356,6 +356,8 @@ class LeaderCountInfo(BaseModel):
         角色ID
     chara_icon_path : str
         角色图标路径
+    chara_name : str
+        调用方提供的角色显示名称，省略时显示头像
     play_count : int
         队长次数
     ex_level : int
@@ -366,6 +368,7 @@ class LeaderCountInfo(BaseModel):
 
     chara_id: int
     chara_icon_path: str
+    chara_name: str = ""
     play_count: int
     ex_level: int
     ex_count: int
