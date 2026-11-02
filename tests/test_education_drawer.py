@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from PIL import Image
 import pytest
 
-from src.sekai.base.plot import Canvas, HSplit, Spacer, TextBox
+from src.sekai.base.plot import Canvas, FillBg, HSplit, Spacer, TextBox
 from src.sekai.education import drawer
+from src.sekai.education.model import LeaderCountInfo
 
 
 def _profile() -> SimpleNamespace:
@@ -305,15 +306,80 @@ def test_leader_count_builder_covers_zero_and_high_counts(isolated_assets: None)
         profile=_profile(),
         max_play_count=60_000,
         leader_counts=[
-            SimpleNamespace(chara_icon_path="a.png", play_count=0, ex_level=0, ex_count=0),
-            SimpleNamespace(chara_icon_path="b.png", play_count=55_000, ex_level=3, ex_count=2),
+            SimpleNamespace(chara_id=1, chara_name="", chara_icon_path="a.png", play_count=0, ex_level=0, ex_count=0),
+            SimpleNamespace(
+                chara_id=2, chara_name="咲希", chara_icon_path="b.png", play_count=55_000, ex_level=3, ex_count=2
+            ),
         ],
     )
 
     canvas = asyncio.run(drawer._build_leader_count_canvas(request))
 
     assert {"55000", "x3", "2"}.issubset(_texts(canvas))
-    assert len(canvas.items[0].items[1].items) == 3
+    assert "总队长次数：55,002 次" in _texts(canvas)
+    assert "咲希 55,002 次（100%）" in _texts(canvas)
+    assert "0 次（0%）" in _texts(canvas)
+    assert len(canvas.items[0].items[2].items) == 3
+
+
+def test_leader_summary_groups_remainder_and_includes_ex_counts(isolated_assets: None) -> None:
+    leaders = [
+        LeaderCountInfo(
+            chara_id=cid,
+            chara_name=f"角色 {cid}",
+            chara_icon_path="icon.png",
+            play_count=count,
+            ex_level=1 if cid == 1 else 0,
+            ex_count=10 if cid == 1 else 0,
+        )
+        for cid, count in [(7, 3), (5, 5), (3, 9), (6, 4), (1, 6), (4, 6), (2, 12)]
+    ]
+    request = SimpleNamespace(profile=_profile(), max_play_count=60_000, leader_counts=leaders)
+    canvas = asyncio.run(drawer._build_leader_count_canvas(request))
+    summary = canvas.items[0].items[1]
+
+    assert _texts(summary) == [
+        "总队长次数：55 次",
+        "角色 1 16 次（29%）",
+        "角色 2 12 次（22%）",
+        "角色 3 9 次（16%）",
+        "角色 4 6 次（11%）",
+        "角色 5 5 次（9%）",
+        "其他 7 次（13%）",
+    ]
+    assert summary.items[1].counts == [16, 12, 9, 6, 5, 7]
+    assert summary.items[2].col_count == 3
+    assert len(canvas.items[0].items[2].items) == 8  # Every character remains in the detail table.
+    assert [info.chara_id for info in request.leader_counts] == [7, 5, 3, 6, 1, 4, 2]
+
+
+@pytest.mark.parametrize("character_count", [0, 1, 6])
+def test_leader_summary_zero_counts_are_renderable(character_count: int, isolated_assets: None) -> None:
+    leaders = [
+        LeaderCountInfo(chara_id=cid, chara_icon_path="icon.png", play_count=0, ex_level=0, ex_count=0)
+        for cid in range(1, character_count + 1)
+    ]
+    request = SimpleNamespace(profile=_profile(), max_play_count=60_000, leader_counts=leaders)
+    canvas = asyncio.run(drawer._build_leader_count_canvas(request))
+    labels = _texts(canvas.items[0].items[1])
+
+    assert labels[0] == "总队长次数：0 次"
+    assert all(label.endswith("0 次（0%）") for label in labels[1:])
+    assert len(labels) == 1 + min(character_count, 5) + (character_count > 5)
+    assert asyncio.run(canvas.get_img()).width == 842
+
+
+def test_leader_share_bar_renders_proportions_and_empty_track() -> None:
+    colors = [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (139, 148, 158, 255)]
+    for counts, expected in [
+        ([3, 2, 0, 5], [colors[0], colors[1], colors[3], colors[3]]),
+        ([0, 0, 0, 0], [(215, 222, 230, 255)] * 4),
+    ]:
+        canvas = Canvas(bg=FillBg((255, 255, 255, 255)))
+        canvas.add_item(drawer._LeaderCountShareBar(counts, colors, 100))
+        image = asyncio.run(canvas.get_img())
+        assert image.size == (100, 14)
+        assert [image.getpixel((x, 7)) for x in (15, 40, 65, 90)] == expected
 
 
 def _mission_row(mission_type: str, *, is_ex: bool = False) -> SimpleNamespace:

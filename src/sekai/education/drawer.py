@@ -19,13 +19,14 @@ from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import (
     BG_PADDING,
+    CHARACTER_COLOR_CODE,
     SEKAI_BLUE_BG,
     Canvas,
     TextStyle,
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.paint_types import BLACK
+from src.sekai.base.paint_types import BLACK, color_code_to_rgb
 from src.sekai.base.plot import (
     FillBg,
     Frame,
@@ -39,6 +40,7 @@ from src.sekai.base.plot import (
     VSplit,
     Widget,
 )
+from src.sekai.base.timezone import caller_label
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_header
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -754,6 +756,95 @@ async def try_render_bonds_payload(rqd: BondsRequest) -> EncodedImagePayload | N
 # ========== 队长次数 ==========
 
 
+class _LeaderCountShareBar(Widget):
+    def __init__(self, counts: list[int], colors: list[tuple[int, ...]], width: int) -> None:
+        super().__init__()
+        self.counts = counts
+        self.colors = colors
+        self.set_size((width, 14))
+
+    def _draw_content(self, p) -> None:
+        width, height = p.size
+        total = sum(self.counts)
+        p.push_clip_roundrect((0, 0), (width, height), height / 2)
+        p.rect((0, 0), (width, height), (215, 222, 230, 255))
+        if total:
+            cumulative = 0
+            left = 0
+            for count, color in zip(self.counts, self.colors, strict=True):
+                cumulative += count
+                right = round(width * cumulative / total)
+                if right > left:
+                    p.rect((left, 0), (right - left, height), color)
+                left = right
+        p.pop_clip()
+
+
+def _build_leader_count_summary(rqd: LeaderCountRequest, icons: list[ImageSource], width: int) -> VSplit:
+    # EX progress is additional to the ordinary mission count, as in Cloud's ranking.
+    ranked = sorted(
+        zip(rqd.leader_counts, icons, strict=True),
+        key=lambda pair: (-(max(pair[0].play_count, 0) + max(pair[0].ex_count, 0)), pair[0].chara_id),
+    )
+    counts = [max(info.play_count, 0) + max(info.ex_count, 0) for info, _ in ranked]
+    colors = [color_code_to_rgb(CHARACTER_COLOR_CODE.get(info.chara_id, "#8b949e")) for info, _ in ranked]
+    total = sum(counts)
+    other_count = sum(counts[5:])
+    other_color = (139, 148, 158, 255)
+    has_others = len(counts) > 5
+    bar_counts = counts[:5] + ([other_count] if has_others else [])
+    bar_colors = colors[:5] + ([other_color] if has_others else [])
+    inner_width = width - 48
+    panel = (
+        VSplit()
+        .set_w(width)
+        .set_padding(24)
+        .set_sep(18)
+        .set_content_align("lt")
+        .set_item_align("lt")
+        .set_bg(roundrect_bg(alpha=80))
+    )
+    title = caller_label(rqd, "education.leader.total", "总队长次数：{count} 次", count=f"{total:,}")
+    panel.add_item(TextBox(title, TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(25, 25, 25, 255))))
+    panel.add_item(_LeaderCountShareBar(bar_counts, bar_colors, inner_width))
+    if not ranked:
+        return panel
+
+    legend = Grid(col_count=3, item_align="lt", h_sep=16, v_sep=10)
+    cell_width = (inner_width - 32) // 3
+    style = TextStyle(font=DEFAULT_FONT, size=16, color=(50, 50, 60, 255))
+    for (info, icon), count, color in zip(ranked[:5], counts[:5], colors[:5], strict=True):
+        entry = HSplit().set_sep(8).set_item_align("l").set_content_align("l")
+        entry.add_item(Spacer(10, 10).set_bg(RoundRectBg(fill=color, radius=5)))
+        name = info.chara_name
+        if not name and icon:
+            entry.add_item(ImageBox(icon, size=(24, 24)))
+        label = caller_label(
+            rqd,
+            "education.leader.entry",
+            "{name} {count} 次（{percent}%）",
+            name=name,
+            count=f"{count:,}",
+            percent=f"{count / total * 100 if total else 0:.0f}",
+        ).strip()
+        entry.add_item(TextBox(label, style).set_w(cell_width - (50 if not name and icon else 18)))
+        legend.add_item(entry)
+    if has_others:
+        label = caller_label(
+            rqd,
+            "education.leader.other",
+            "其他 {count} 次（{percent}%）",
+            count=f"{other_count:,}",
+            percent=f"{other_count / total * 100 if total else 0:.0f}",
+        )
+        entry = HSplit().set_sep(8).set_item_align("l").set_content_align("l")
+        entry.add_item(Spacer(10, 10).set_bg(RoundRectBg(fill=other_color, radius=5)))
+        entry.add_item(TextBox(label, style).set_w(cell_width - 18))
+        legend.add_item(entry)
+    panel.add_item(legend)
+    return panel
+
+
 def _build_leader_count_row(
     info,
     chara_icon: ImageSource | None,
@@ -820,6 +911,7 @@ async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
     table.add_item(_build_education_table_header(labels, widths, header_style))
     for index, (info, icon) in enumerate(zip(rqd.leader_counts, leader_icons, strict=True)):
         table.add_item(_build_leader_count_row(info, icon, index, rqd.max_play_count, text_style, widths))
+    root.add_item(_build_leader_count_summary(rqd, leader_icons, sum(widths) + 8 * (len(widths) - 1) + 40))
     root.add_item(table)
     canvas.add_item(root)
 
