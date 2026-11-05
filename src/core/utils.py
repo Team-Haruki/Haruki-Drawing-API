@@ -5,7 +5,7 @@ import logging
 
 from fastapi.responses import JSONResponse, Response
 
-from src.artifact.directive import HEADER_ARTIFACT_MODE, MODE_STORE_REF, RenderCacheDirective
+from src.artifact.directive import HEADER_ARTIFACT_MODE, MODE_CACHE_REF, MODE_STORE_REF, RenderCacheDirective
 from src.artifact.runtime import get_artifact_runtime
 from src.artifact.stats import artifact_node_name, artifact_stats
 from src.core.cache_identity import renderer_epoch
@@ -165,7 +165,9 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
     without a directive gets today's bytes response plus that one header. In artifact mode `Cache-Store: 0`
     returns bytes and stores nothing (E2/A3); any storage failure degrades to bytes with
     `X-Haruki-Artifact-Degraded: 1` (invariant I1). `Cache-Store: 0` with `X-Haruki-Artifact-Mode: store-ref`
-    uploads without any index write and returns the ref (docs/artifact-storage.md §12).
+    uploads without any index write and returns the ref (docs/artifact-storage.md §12). A storable render with
+    `X-Haruki-Artifact-Mode: cache-ref` does the same, and the caller writes both index rows (§13); a render that
+    may not be stored is answered `store0` first, whatever the mode.
     """
     directive = current_render_directive()
     missing = current_missing_asset_count() + payload.missing_asset_count
@@ -187,6 +189,8 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
             missing=missing,
             headers={**node, CACHE_STORE_HEADER: "0"},
         )
+    if directive.cache_ref:
+        return await _cache_ref_response(payload, directive, missing=missing, node=node)
     outcome = await get_artifact_runtime().process(payload, directive)
     ref = outcome.ref
     if ref is not None:
@@ -244,4 +248,36 @@ async def _store_ref_response(
         reason=f"{outcome.reason}{_format_artifact_stages(outcome.stages)}",
         missing=missing,
         headers={**headers, DEGRADED_HEADER: "1"},
+    )
+
+
+async def _cache_ref_response(
+    payload: EncodedImagePayload, directive: RenderCacheDirective, *, missing: int, node: Mapping[str, str]
+) -> Response:
+    """Cache-ref branch: the ref JSON, or the bytes with `Degraded: 1`. Never `Cache-Store: 0`.
+
+    Only a render that artifact mode would store gets here: missing assets, missing resources and a stale renderer
+    epoch were already answered `store0` above. The upload is store-ref's; the caller records both the
+    `image_cache_entries` and the `render_cache_index` row, so this node makes no index round trip at all.
+    """
+    outcome = await get_artifact_runtime().process_store_ref(payload, directive, mode="cache_ref")
+    ref = outcome.ref
+    if ref is not None:
+        _log_image_response(
+            payload,
+            artifact="cache_ref",
+            missing=missing,
+            detail=(
+                f" hash={ref.hash} writer={ref.node_name} upload={ref.upload_elapsed:.3f}"
+                f"{_format_artifact_stages(outcome.stages)}"
+            ),
+        )
+        set_request_stage("send_response")
+        return JSONResponse(ref.to_json(), headers={ARTIFACT_HEADER: "1", HEADER_ARTIFACT_MODE: MODE_CACHE_REF, **node})
+    return _log_and_return_bytes(
+        payload,
+        artifact="cache_ref_degraded",
+        reason=f"{outcome.reason}{_format_artifact_stages(outcome.stages)}",
+        missing=missing,
+        headers={**node, DEGRADED_HEADER: "1"},
     )

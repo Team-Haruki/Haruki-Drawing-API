@@ -6,8 +6,9 @@ index rows have committed under the shared content lock. The PUT itself runs out
 covered by a committed, unexpired upload intent that GC cannot act on, and the locked write re-checks that
 intent before it records the path (docs/artifact-storage.md §6).
 
-`process_store_ref` is the upload-only variant (`X-Haruki-Artifact-Mode: store-ref`): hash, PUT under Cloud's
-own image-cache key layout, ref. It touches no index; the caller records the row (docs/artifact-storage.md §12).
+`process_store_ref` is the upload-only variant (`X-Haruki-Artifact-Mode: store-ref` or `cache-ref`): hash, PUT
+under Cloud's own image-cache key layout, ref. It touches no index; the caller records the rows
+(docs/artifact-storage.md §12, §13).
 
 Neither `opendal` nor `asyncpg` is imported here; the store and index arrive already built.
 """
@@ -18,6 +19,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 import hashlib
 import logging
 import time
@@ -441,54 +443,66 @@ class ArtifactService:
         )
         return ArtifactOutcome(ref=ref, degraded=False, reason="reused" if reused else "ok", stages=stages)
 
-    # ------------------------------------------------------------------ store-ref (upload only)
+    # ------------------------------------------------------------------ store-ref / cache-ref (upload only)
 
-    def _store_ref_degraded(self, reason: str, stages: dict[str, float]) -> ArtifactOutcome:
-        self._stats.store_ref_degraded(reason)
+    def _upload_only_degraded(self, mode: str, reason: str, stages: dict[str, float]) -> ArtifactOutcome:
+        self._stats.upload_only_degraded(mode, reason)
         return ArtifactOutcome(ref=None, degraded=True, reason=reason, stages=stages)
 
-    async def process_store_ref(self, payload: EncodedImagePayload, directive: RenderCacheDirective) -> ArtifactOutcome:
-        """Upload the bytes under Cloud's image-cache key layout and return a ref; never touch the index."""
+    async def process_store_ref(
+        self, payload: EncodedImagePayload, directive: RenderCacheDirective, *, mode: str = "store_ref"
+    ) -> ArtifactOutcome:
+        """Upload the bytes under Cloud's image-cache key layout and return a ref; never touch the index.
+
+        `mode` is the `/render-stats` block that counts it: `store_ref`, or `cache_ref` for a render the caller
+        caches and indexes itself. The upload and the ref are the same in both.
+        """
         stages: dict[str, float] = {}
         started = self._clock()
-        self._stats.store_ref_incr("requests")
+        record = partial(self._stats.record_upload_only_stage, mode)
+        self._stats.upload_only_incr(mode, "requests")
         try:
-            return await self._process_store_ref(payload, directive, stages)
+            return await self._process_store_ref(payload, directive, stages, mode, record)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error(
-                "artifact.store_ref_internal_error api_path=%s exc=%s",
+                "artifact.%s_internal_error api_path=%s exc=%s",
+                mode,
                 directive.api_path,
                 type(exc).__name__,
                 exc_info=True,
             )
-            self._stats.record_error("store_ref", exc)
-            return self._store_ref_degraded("internal", stages)
+            self._stats.record_error(mode, exc)
+            return self._upload_only_degraded(mode, "internal", stages)
         finally:
-            self._stage_done(stages, "total", started, self._stats.record_store_ref_stage)
+            self._stage_done(stages, "total", started, record)
 
     async def _process_store_ref(
-        self, payload: EncodedImagePayload, directive: RenderCacheDirective, stages: dict[str, float]
+        self,
+        payload: EncodedImagePayload,
+        directive: RenderCacheDirective,
+        stages: dict[str, float],
+        mode: str,
+        record: StageRecorder,
     ) -> ArtifactOutcome:
         store = self._store
         if store is None:
-            return self._store_ref_degraded("runtime_unavailable", stages)
+            return self._upload_only_degraded(mode, "runtime_unavailable", stages)
         if extension_for_media_type(payload.media_type) is None:
             logger.warning(
                 "artifact.unsupported_media media_type=%s api_path=%s", payload.media_type, directive.api_path
             )
-            return self._store_ref_degraded("unsupported_media", stages)
-        record = self._stats.record_store_ref_stage
+            return self._upload_only_degraded(mode, "unsupported_media", stages)
         content_hash = await self._hash(payload.image_bytes, stages, record)
         # A fresh generation per write, like Cloud's own writer: the key is never reused, so a delayed DELETE of
         # an older object with the same content can never remove this one.
         object_key = build_store_ref_key(content_hash, payload.media_type, generation=new_store_ref_generation())
         put = await self._upload(store, object_key, payload, stages, record)
         if isinstance(put, str):
-            return self._store_ref_degraded(put, stages)
-        self._stats.store_ref_incr("published")
-        self._stats.store_ref_incr("upload_bytes", len(payload.image_bytes))
+            return self._upload_only_degraded(mode, put, stages)
+        self._stats.upload_only_incr(mode, "published")
+        self._stats.upload_only_incr(mode, "upload_bytes", len(payload.image_bytes))
         ref = ArtifactRef(
             kind=ARTIFACT_KIND,
             hash=content_hash,
