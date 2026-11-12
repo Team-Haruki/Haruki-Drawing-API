@@ -40,7 +40,7 @@ async def test_play_progress_builder_draws_profile_icons_and_all_result_segments
         paths.append(path)
         return _image()
 
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile)
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
     request = PlayProgressRequest(
         profile=_profile(),
@@ -75,7 +75,7 @@ async def test_detail_rewards_builder_draws_default_and_custom_icons_with_runnin
         paths.append(path)
         return _image()
 
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile)
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
     rewards = {
         difficulty: [MusicComboReward(level=level, reward=amount), MusicComboReward(level=level + 1, reward=amount + 1)]
@@ -105,7 +105,7 @@ async def test_basic_rewards_builder_and_text_icon_cover_optional_text(monkeypat
     async def fake_asset(_root, _path):
         return _image()
 
-    monkeypatch.setattr(drawer, "get_profile_card", lambda _profile: _async_value(None))
+    monkeypatch.setattr(drawer, "get_profile_header", lambda _profile: _async_value(None))
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
     request = BasicMusicRewardsRequest(
         profile=_profile(),

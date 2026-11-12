@@ -11,6 +11,8 @@ from src.sekai.mysekai.content_drawer import (
     try_render_mysekai_bulk_harvest_payload,
     try_render_mysekai_shop_payload,
 )
+from src.sekai.mysekai.convert_drawer import try_render_mysekai_convert_recipes_payload
+from src.sekai.mysekai.convert_model import MysekaiConvertRecipesRequest
 from src.sekai.mysekai.housing_drawer import (
     try_render_mysekai_housing_competition_payload,
 )
@@ -196,6 +198,22 @@ async def mysekai_shop(request: MysekaiShopRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_shop render failed")
+        raise render_http_exception(e)
+
+
+@router.post(
+    "/convert-recipes",
+    summary="Generate MySekai converter recipe image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
+async def mysekai_convert_recipes(request: MysekaiConvertRecipesRequest):
+    """Generate converter recipes with their complete input and output slots."""
+    try:
+        payload = await try_render_mysekai_convert_recipes_payload(request)
+        payload = require_native_payload(payload)
+        return await encoded_image_payload_to_response(payload)
+    except Exception as e:
+        _logger.exception("mysekai_convert_recipes render failed")
         raise render_http_exception(e)
 
 

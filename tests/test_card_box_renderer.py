@@ -306,7 +306,7 @@ async def test_card_box_profile_expands_panel_width(monkeypatch) -> None:
     async def fake_profile(_request):
         return card.Spacer(w=900, h=100)
 
-    monkeypatch.setattr(card, "get_profile_card", fake_profile)
+    monkeypatch.setattr(card, "get_profile_header", fake_profile)
 
     profile, panel_width, text_width = await card._card_box_profile(request, layout)
 

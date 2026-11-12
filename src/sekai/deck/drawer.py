@@ -68,7 +68,7 @@ from src.sekai.profile.custom_profile.font_field import basic_text_field
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
     get_card_full_thumbnail_layers,
-    get_profile_card,
+    get_profile_header,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
@@ -988,13 +988,16 @@ def _icon_pill(icons: list[tuple[ImageSource, tuple[int | None, int]]], text: st
 
 
 def _deck_header_pills(rqd: DeckRequest, assets: _DeckRecommendAssets) -> list[_HeaderPill]:
-    """WL chapter, simulated unit + attribute, then the song (filters are drawn with the settings instead)."""
+    """WL chapter, simulated unit with optional attribute, then song; filters stay in settings."""
     pills = []
     if rqd.is_wl and rqd.wl_chara_name:
         icons = [(assets.wl_chara_icon, (_PILL_ICON, _PILL_ICON))] if assets.wl_chara_icon is not None else []
         pills.append(_icon_pill(icons, f"{rqd.wl_chara_name} 章节"))
-    if assets.unit_logo and assets.attr_icon and not (rqd.unit_filter or rqd.attr_filter):
-        pills.append(_icon_pill([(assets.unit_logo, (None, _PILL_ICON)), (assets.attr_icon, (30, 30))]))
+    if assets.unit_logo and not (rqd.unit_filter or rqd.attr_filter):
+        icons = [(assets.unit_logo, (None, _PILL_ICON))]
+        if assets.attr_icon:
+            icons.append((assets.attr_icon, (30, 30)))
+        pills.append(_icon_pill(icons))
     if _deck_shows_music(rqd, assets):
         pills.append(_music_pill(rqd, assets))
     return pills
@@ -1161,15 +1164,19 @@ async def _draw_deck_header(rqd: DeckRequest, assets: _DeckRecommendAssets, widt
 # ---------------------------------------------------------------------------
 
 
-def _deck_score(rqd: DeckRequest, deck, target_score: bool, boost_bonus: int) -> int:
+def _deck_uses_live_boost(rqd: DeckRequest) -> bool:
+    return rqd.recommend_type in {"event", "wl", "unit_attr"} and rqd.target == "score" and rqd.boost is not None
+
+
+def _deck_score(rqd: DeckRequest, deck) -> int:
     if rqd.recommend_type == "no_event":
         score = deck.live_score or 0
     elif rqd.recommend_type == "mysekai":
         score = deck.mysekai_event_point or 0
     else:
         score = deck.score or 0
-    if rqd.boost is not None and target_score:
-        score = int(score * boost_bonus)
+    if _deck_uses_live_boost(rqd):
+        score = int(score * _boost_bonus(rqd))
     return score
 
 
@@ -1183,7 +1190,7 @@ def _metric_label(rqd: DeckRequest, key: str) -> str:
 
 def _metric_value(rqd: DeckRequest, deck, key: str) -> str:
     if key == "score":
-        return format_deck_int(_deck_score(rqd, deck, rqd.target == "score", _boost_bonus(rqd)))
+        return format_deck_int(_deck_score(rqd, deck))
     if key == "bonus":
         total = (deck.event_bonus_rate or 0) + ((deck.support_deck_bonus_rate or 0) if rqd.is_wl else 0)
         return format_deck_percent(total)
@@ -1584,7 +1591,7 @@ def _draw_deck_results(rqd: DeckRequest, assets: _DeckRecommendAssets, layout: _
     with _panel(width):
         chips = [(f"{len(rqd.deck_data)} 组", accent)] if rqd.deck_data else []
         boost = []
-        if rqd.boost is not None and rqd.target == "score":
+        if _deck_uses_live_boost(rqd):
             boost.append((f"{rqd.boost}🔥 PT×{_boost_bonus(rqd)}", _BONUS_ORANGE))
         _section_header("推荐卡组", accent, chips=chips, soft_chips=boost, captions=_deck_results_captions(rqd))
         if not rqd.deck_data:
@@ -1663,7 +1670,7 @@ async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(14).set_padding(16):
             if not rqd.is_max_deck:
-                await get_profile_card(rqd.profile.to_profile_card_request())
+                await get_profile_header(rqd.profile.to_profile_card_request())
             await _draw_deck_header(rqd, assets, width)
             _draw_deck_results(rqd, assets, layout, width)
             if rqd.event_planner:

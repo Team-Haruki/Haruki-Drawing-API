@@ -62,6 +62,7 @@ from src.sekai.base.utils import (
     get_composed_image_cached,
     get_composed_image_disk_cached,
     get_encoded_image_ref,
+    get_optional_asset_image_ref,
     get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
@@ -75,7 +76,7 @@ from src.sekai.honor.drawer import (
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.sekai.skia_renderer.card_common import rare_count
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, STATIC_IMAGE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -1549,7 +1550,7 @@ async def _build_profile_card_modules(rqd: ProfileCardRequest) -> list[Widget]:
 async def get_profile_card(rqd: ProfileCardRequest, *, blur_glass: bool = True) -> Frame:
     r"""get_profile_card
 
-    获取玩家个人信息的简单卡片控件
+    获取玩家个人信息的简单卡片控件。页面放置卡片请用 ``get_profile_header``（卡片 + 页面右侧的 bot logo）。
 
     Args
     ----
@@ -1580,6 +1581,128 @@ async def get_profile_card(rqd: ProfileCardRequest, *, blur_glass: bool = True) 
         # The card is the player's list row: frame it the way the friend list / ranking rows are.
         return await wrap_with_player_frame(f, rqd.profile.frame_paths, cell="horizontal")
     return f
+
+
+# ---------------------------------------------------------------------------
+# Profile header: the profile card on the left and the bot logo at the right edge of the page content, on
+# one row. Every page that shows the card draws it through get_profile_header(); the card itself is
+# unchanged. The row takes the width its parent's OTHER items already give the page, so the logo never
+# widens a page: it is drawn at full size when it fits, shrunk while it stays legible, and left out otherwise.
+# ---------------------------------------------------------------------------
+
+# Under assets.base_dir (the data volume, like every static image). None turns the logo off; a deployment
+# without the file draws the bare card exactly as before (the asset is optional).
+PROFILE_HEADER_LOGO_PATH: str | None = f"{STATIC_IMAGE_DIR}/branding/bot_neo_logo.png"
+_HEADER_LOGO_HEIGHT_RATIO = 0.72  # of the card's height
+_HEADER_LOGO_MAX_H = 104
+_HEADER_LOGO_MIN_H = 40  # below this the logo's lettering is unreadable: drop it instead
+_HEADER_LOGO_GAP = 24  # least space between the card and the logo
+_HEADER_LOGO_VALIGN = "c"  # "c": centred on the card, "t": level with the card's top
+
+
+class ProfileHeaderRow(Widget):
+    """The profile card, and the logo right-aligned to the width the row's parent gives the page.
+
+    The width is read off the parent: its fixed width when it has one (card box wraps the card in a
+    fixed-width row), else its widest other item (the page's panels). Before the row has a parent it
+    measures as the bare card, so a page that sizes itself from the card first (card box) sees the same
+    width as before.
+    """
+
+    def __init__(self, card: Widget, logo: AssetImageRef) -> None:
+        super().__init__()
+        self.card = card
+        self.logo = logo
+        token = Widget._thread_local.set(None)  # the logo belongs to this row, not the open widget context
+        try:
+            self.logo_box = ImageBox(logo, size=(1, 1), use_alpha_blend=True)  # sized by _layout()
+        finally:
+            Widget._thread_local.reset(token)
+        self.items: list[Widget] = []
+        for item in (card, self.logo_box):
+            item.set_parent(self)
+        self.set_margin(0)
+        self.set_padding(0)
+
+    def add_item(self, item: Widget) -> None:
+        raise TypeError("ProfileHeaderRow holds exactly the card and the logo")
+
+    def _page_w(self) -> int:
+        parent = self.parent
+        if parent is None:
+            return 0
+        others = [item for item in parent.items if item is not self]
+        horizontal = isinstance(parent, HSplit)
+        if parent.w is not None and not (horizontal and others):
+            return parent.w - 2 * parent.h_padding
+        if horizontal:
+            return 0  # the row shares its line with other items: no page edge to align to, the bare card
+        return max((item._get_self_size()[0] for item in others), default=0)
+
+    def _layout(self) -> tuple[int, int, tuple[int, int] | None]:
+        """``(row width, row height, logo size or None)``."""
+        card_w, card_h = self.card._get_self_size()
+        logo_h = min(_HEADER_LOGO_MAX_H, round(card_h * _HEADER_LOGO_HEIGHT_RATIO))
+        logo_w = round(logo_h * self.logo.width / self.logo.height)
+        row_w = max(card_w, self._page_w())
+        room = row_w - card_w - _HEADER_LOGO_GAP
+        if room < logo_w:
+            logo_w, logo_h = room, int(room * self.logo.height / self.logo.width)
+        if logo_h < _HEADER_LOGO_MIN_H:
+            return row_w, card_h, None
+        return row_w, card_h, (logo_w, logo_h)
+
+    def _get_content_size(self) -> tuple[int, int]:
+        row_w, row_h, logo_size = self._layout()
+        self.items = [self.card] if logo_size is None else [self.card, self.logo_box]
+        if logo_size is not None and (self.logo_box.w, self.logo_box.h) != logo_size:
+            self.logo_box.set_size(logo_size)
+            self.logo_box._calc_w = self.logo_box._calc_h = None
+        return row_w, row_h
+
+    def _get_self_size(self) -> tuple[int, int]:
+        # Never cached: the width follows the parent's other items, which may still be added after a
+        # caller measured the bare card. The tree is complete by the time anything draws it.
+        self._calc_w = self._calc_h = None
+        return super()._get_self_size()
+
+    def _draw_content(self, p: Painter) -> None:
+        row_w, row_h, logo_size = self._layout()
+        card_w, card_h = self.card._get_self_size()
+        p.move_region((0, 0), (card_w, card_h))
+        self.card.draw(p)
+        p.restore_region()
+        if logo_size is not None:
+            logo_w, logo_h = logo_size
+            y = (row_h - logo_h) // 2 if _HEADER_LOGO_VALIGN == "c" else 0
+            p.move_region((row_w - logo_w, y), logo_size)
+            self.logo_box.draw(p)
+            p.restore_region()
+
+
+async def _load_profile_header_logo() -> AssetImageRef | None:
+    if not PROFILE_HEADER_LOGO_PATH:
+        return None
+    return await get_optional_asset_image_ref(ASSETS_BASE_DIR, PROFILE_HEADER_LOGO_PATH)
+
+
+async def get_profile_header(rqd: ProfileCardRequest, *, blur_glass: bool = True) -> Widget:
+    """``get_profile_card`` plus the bot logo at the right edge of the page (see :class:`ProfileHeaderRow`).
+
+    A drop-in for ``get_profile_card``: the result joins the open widget context the same way, and is the
+    bare card when the logo is off or absent.
+    """
+    token = Widget._thread_local.set(None)  # build the card detached; the row (or card) attaches below
+    try:
+        card = await get_profile_card(rqd, blur_glass=blur_glass)
+    finally:
+        Widget._thread_local.reset(token)
+    logo = await _load_profile_header_logo()
+    if logo is None:
+        if (current := Widget.get_current_widget()) is not None:
+            current.add_item(card)
+        return card
+    return ProfileHeaderRow(card, logo)
 
 
 # ---------------------------------------------------------------------------

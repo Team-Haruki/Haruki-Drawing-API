@@ -313,3 +313,40 @@ def test_draw_event_cards_limits_visible_cards_and_uses_four_columns(monkeypatch
         event_drawer._draw_event_cards(cards, layers, styles)
 
     assert seen_layers == layers[:8]
+
+
+def test_event_detail_loads_all_bonus_attributes_without_duplicate_icons(monkeypatch) -> None:
+    request = _event_request()
+    paths = [f"attr-{attr}.png" for attr in ("cute", "cool", "pure", "happy", "mysterious")]
+    request.event_assets.event_attr_image_paths = paths + paths[:1]
+    request.event_assets.event_attr_image_path = "legacy.png"
+    calls = []
+
+    async def fake_asset(_root, path):
+        calls.append(path)
+        return path
+
+    monkeypatch.setattr(event_drawer, "get_asset_image_ref", fake_asset)
+    monkeypatch.setattr(event_drawer, "get_optional_asset_image_ref", fake_asset)
+    images = asyncio.run(event_drawer._load_event_detail_images(request, [], True))
+    assert [images[event_drawer._event_attribute_key(i)] for i in range(5)] == paths
+    assert "legacy.png" not in calls
+    assert all(calls.count(path) == 1 for path in paths)
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_event_bonus_draws_every_attribute_and_keeps_character_icons(monkeypatch, multiple) -> None:
+    request = _event_request()
+    count = 5 if multiple else 1
+    if multiple:
+        request.event_assets.event_attr_image_paths = [f"attr-{i}.png" for i in range(count)]
+    icons = [object() for _ in range(count + 1)]
+    images = {event_drawer._event_attribute_key(i): icons[i] for i in range(count)}
+    images["bonus_chara_0"] = icons[-1]
+    drawn = []
+    monkeypatch.setattr(event_drawer, "ImageBox", lambda image, **_kwargs: drawn.append(image))
+    style = event_drawer.TextStyle(font=event_drawer.DEFAULT_BOLD_FONT, size=24, color=(0, 0, 0))
+    styles = event_drawer._EventDetailStyles(style, style, style, style, style)
+    with event_drawer.Canvas(bg=event_drawer.SEKAI_BLUE_BG):
+        event_drawer._draw_event_bonus(request, images, styles)
+    assert drawn == icons

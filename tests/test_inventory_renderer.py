@@ -113,7 +113,7 @@ def test_build_inventory_canvas_coordinates_sections(monkeypatch):
         events.append("profile")
 
     monkeypatch.setattr(drawer, "_load_inventory_icons", load_icons)
-    monkeypatch.setattr(drawer, "get_profile_card", profile)
+    monkeypatch.setattr(drawer, "get_profile_header", profile)
     monkeypatch.setattr(drawer, "_draw_header", lambda: events.append("header"))
     monkeypatch.setattr(
         drawer, "_draw_section", lambda section, icons, _now, _request=None: events.append((section.title, icons))

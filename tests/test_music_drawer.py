@@ -58,7 +58,7 @@ def test_music_brief_canvas_renders_profile_results_and_all_difficulty_shapes(mo
         return [await fake_image_loader(root, path, **kwargs) for path in paths]
 
     monkeypatch.setattr(music_drawer, "get_asset_image_refs", fake_assets)
-    monkeypatch.setattr(music_drawer, "get_profile_card", fake_profile_card)
+    monkeypatch.setattr(music_drawer, "get_profile_header", fake_profile_card)
     request = MusicBriefListRequest(
         region="JP",
         required_difficulty="master",
@@ -178,7 +178,7 @@ def test_music_list_canvas_renders_an_optional_profile(monkeypatch) -> None:
     async def fake_profile_card(request):
         received_profiles.append(request)
 
-    monkeypatch.setattr(music_drawer, "get_profile_card", fake_profile_card)
+    monkeypatch.setattr(music_drawer, "get_profile_header", fake_profile_card)
     request = MusicListRequest(
         user_results={},
         music_list=[],

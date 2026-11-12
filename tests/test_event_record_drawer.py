@@ -74,7 +74,7 @@ def test_build_event_record_canvas_dispatches_both_groups(monkeypatch) -> None:
     async def fake_group(name, events, *_styles) -> None:
         calls.append((name, [item.id for item in events]))
 
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile)
     monkeypatch.setattr(drawer, "_draw_event_record_group", fake_group)
     monkeypatch.setattr(drawer, "add_request_watermark", lambda *_args: None)
     request = EventRecordRequest(
@@ -94,7 +94,7 @@ def test_build_event_record_canvas_accepts_empty_history_without_note(monkeypatc
     async def fake_profile(_request) -> None:
         return None
 
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile)
     monkeypatch.setattr(drawer, "add_request_watermark", lambda *_args: None)
     request = EventRecordRequest(event_info=[], wl_event_info=[], user_info=_profile())
 

@@ -605,6 +605,7 @@ key and the label is only drawn. A request without `labels` renders as before. T
 | player / rank trace | `sk.trace.player_score`, `sk.trace.player_rank` (`{name}`), `sk.trace.compare_line`, `sk.trace.compare_current`, `sk.trace.rank_title` (`{rank}`), `sk.trace.reference_line`, `sk.trace.reference_current`, `sk.trace.player_title` (`{names}`), `sk.trace.score_line`, `sk.trace.speed`, `sk.trace.predicted_final` (`{score}`) |
 | deck / event planner | `deck.title.<title key>` (`{event_id}`, `{noun}`), `deck.noun.deck`, `deck.noun.planner`, `deck.algorithm.<alg>`, `deck.skill_order.<strategy>`, `deck.skill_reference.<strategy>`, `deck.planner.title`, `deck.planner.source` (`{source}`), `deck.planner.target` / `current` / `remaining` (`{point}`) |
 | gacha detail | `gacha.type.<type>`, `gacha.behavior.<type>`, `gacha.spin.single`, `gacha.spin.ten`, `gacha.colorful_pass` (`{behavior}`), `gacha.execute_limit` (`{count}`), `gacha.rarity.<rarity>` |
+| leader count summary | `education.leader.total` (`{count}`), `education.leader.entry` (`{name}`, `{count}`, `{percent}`), `education.leader.other` (`{count}`, `{percent}`); `LeaderCountInfo.chara_name` is caller-supplied display text, while segment colours use `chara_id` |
 | inventory | `inventory.resource_type.<type>` |
 | costume list | `costume.part.<body\|head\|hair>` |
 | card list / card box | `card.unreleased`, `card.attr.<attr>` |
