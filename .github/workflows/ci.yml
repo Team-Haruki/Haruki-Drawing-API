@@ -26,7 +26,11 @@ jobs:
   # the smoke job are written here; the old workflow steps live in scripts/ci/.
   renderer:
     name: Skia renderer wheel
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the wheel links against the runner's glibc and must load in the
+    # debian:trixie-slim runtime image (glibc 2.41). ubuntu-latest moved to 26.04 (glibc 2.43) in
+    # 2026-11 and its wheel failed the image's import check with `GLIBC_2.43' not found`. Move this
+    # pin only to a runner whose glibc is <= the runtime image's.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,7 +42,7 @@ jobs:
       - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
         with:
           working-directory: rust/haruki_skia_renderer # stable, as before
-          cache-key: skia-renderer
+          cache-key: skia-renderer-ubuntu-24.04 # objects built on another glibc must not be reused
           cache-workspaces: |
             rust/haruki_skia_renderer -> target
             rust/haruki_skia_renderer -> target-test
@@ -79,7 +83,7 @@ jobs:
   smoke:
     name: Free-threaded smoke
     needs: [renderer]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # the oldest glibc the wheel targets, same runner as the build
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
