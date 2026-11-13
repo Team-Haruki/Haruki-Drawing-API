@@ -498,7 +498,16 @@ class ArtifactService:
         # A fresh generation per write, like Cloud's own writer: the key is never reused, so a delayed DELETE of
         # an older object with the same content can never remove this one.
         object_key = build_store_ref_key(content_hash, payload.media_type, generation=new_store_ref_generation())
-        put = await self._upload(store, object_key, payload, stages, record)
+        # `_upload` bounds the PUT but not the wait for an upload slot. Bound both together with the per-request
+        # upload budget, as artifact mode does: under a burst every cached render takes this path, and a waiter
+        # holds its encoded bytes for as long as it queues.
+        try:
+            async with asyncio.timeout(float(self._settings.upload_timeout_seconds)):
+                put = await self._upload(store, object_key, payload, stages, record)
+        except TimeoutError:
+            self._stats.incr("upload_timeouts")
+            logger.warning("artifact.%s_upload_timeout key=%s bucket=%s", mode, object_key, store.bucket)
+            return self._upload_only_degraded(mode, "upload_timeout", stages)
         if isinstance(put, str):
             return self._upload_only_degraded(mode, put, stages)
         self._stats.upload_only_incr(mode, "published")

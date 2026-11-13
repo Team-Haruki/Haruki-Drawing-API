@@ -339,6 +339,37 @@ def test_upload_timeout_degrades_to_bytes() -> None:
     assert artifact_stats_mod.get_artifact_stats()["cache_ref"]["degraded"]["upload_timeout"] == 1
 
 
+@pytest.mark.parametrize("mode", ["cache_ref", "store_ref"])
+def test_waiting_for_an_upload_slot_counts_against_the_upload_budget(mode: str) -> None:
+    """A request queued behind busy upload slots degrades within the upload budget instead of waiting forever."""
+    store = FakeObjectStore(bucket="image-cache")
+    storage = StorageSettings(enabled=True, upload_timeout_seconds=0.05, upload_concurrency=1)
+    runtime = build_test_runtime(store=store, settings=storage)
+    service = runtime.service
+    assert service is not None
+
+    async def scenario() -> tuple[str, float]:
+        slots = service._slots()
+        await slots.acquire()  # another upload holds the only slot for longer than the budget
+        try:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            # The outer bound only keeps a regression from hanging the suite; the budget under test is 0.05 s.
+            outcome = await asyncio.wait_for(service.process_store_ref(_payload(), _directive(), mode=mode), 5.0)
+            return outcome.reason, loop.time() - started
+        finally:
+            slots.release()
+
+    reason, elapsed = asyncio.run(scenario())
+
+    assert reason == "upload_timeout"
+    assert elapsed < 1.0
+    assert store.writes == []
+    snapshot = artifact_stats_mod.get_artifact_stats()
+    assert snapshot[mode]["degraded"]["upload_timeout"] == 1
+    assert snapshot[mode].get("published", 0) == 0
+
+
 @pytest.mark.parametrize("reason", ["disabled", "runtime_unavailable"])
 def test_unavailable_runtime_degrades_to_bytes(reason: str) -> None:
     set_artifact_runtime(ArtifactRuntime(reason=reason))
