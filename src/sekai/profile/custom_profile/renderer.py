@@ -238,7 +238,14 @@ TMP_DYNAMIC_SDF_DISTANCE_MASK_SIZE = 5
 # atlases where _GradientScale is 6 for padding 5.
 TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS = 0.1
 TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS = 24
-TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH = 50000.0
+# A ContentSizeFitter text box with a percentage (line-)indent settles at the fixed point
+# width = line width / (1 - percent): TMP resolves the percentage against the current rect
+# width, so every layout pass feeds the previous width back in. Players use 96-98.3% indents
+# with tens of thousands of units of position to push glyphs (stripes, giant ■ masks) into or
+# out of the card; those fixed points reach 60,000-90,000 units, and the old 50,000 cap pulled
+# the glyphs back onto the card. This bound only stands in for the divergent case (percent >= 1,
+# where Unity keeps growing the rect every frame) and must stay far outside any card.
+TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH = 10_000_000.0
 SHAPE_SDF_RATIO_SCALE = 1.0
 # ShapeContentView.set_OutlineSize writes
 # DistanceFieldImage.OutlineFillRatio = clamp(outlineSize, 0, 1) * 0.95.

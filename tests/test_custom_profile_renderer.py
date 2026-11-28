@@ -3044,6 +3044,23 @@ def test_custom_profile_preferred_percent_indent_resolves_finite_and_saturated_w
     )
 
 
+def test_custom_profile_preferred_percent_indent_keeps_fixed_points_beyond_50k(tmp_path: Path) -> None:
+    # A real CN card pushes white `<scale=60>` ■ masks off the card with 97-98.3% line indents;
+    # their fixed points are 60k-90k units wide. Capping them at 50k dragged the masks back over
+    # the whole card (only the stripes stayed visible) and shifted the 96% stripes by ~5 px.
+    renderer = _make_renderer(tmp_path, tmp_box_mode="preferred", tmp_preferred_padding_x=64.0)
+    indent = renderer_mod.StyledLine([], replace(_base_tmp_style(), line_indent_percent=0.983))
+    layout = SimpleNamespace(
+        preferred_width=1000.0,
+        lines=[SimpleNamespace(styled_line=indent, width=1000.0)],
+        dominant_size=500.0,
+        content_height=500.0,
+    )
+
+    assert renderer.tmp_preferred_percent_indent_margin_width(layout) == pytest.approx(1064.0 / (1.0 - 0.983))
+    assert renderer_mod.TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH >= 1_000_000.0
+
+
 def test_custom_profile_percent_indent_fixed_point_converges(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path, tmp_box_mode="size")
     line = renderer_mod.StyledLine([], replace(_base_tmp_style(), indent_percent=0.5))
