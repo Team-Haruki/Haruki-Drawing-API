@@ -35,8 +35,14 @@ BondsTintMode: TypeAlias = Literal["multiply", "recolor"]
 
 BONDS_BACKGROUND_CENTER_OVERLAP = 3
 BONDS_CHARACTER_SCALE = 0.8
-BONDS_MAIN_CHARACTER_OFFSET = 120
 BONDS_SUB_CHARACTER_OFFSET = 30
+# Main (full-size) badges, fitted to a CN client capture of a 380x80 bonds badge (2026-11-29):
+# both 160x136 SD sprites are drawn at native size, the left one flush with the badge's left
+# edge and the right one flush with its right edge, bottoms 13 px below the badge (the mask
+# trims the overflow). The legacy 0.8 scale with faces at middle +-120 drew them ~20% too small and
+# pulled them towards the word. Sub badges keep the legacy placement (no capture yet).
+BONDS_MAIN_CHARACTER_SCALE = 1.0
+BONDS_MAIN_CHARACTER_BOTTOM_OVERHANG = 13
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,22 +295,19 @@ def build_bonds_honor_plan(
 
     c1_source_size = _checked_size("chara_icon_1", chara_icon_1_size)
     c2_source_size = _checked_size("chara_icon_2", chara_icon_2_size)
-    c1_resize = (
-        int(c1_source_size[0] * BONDS_CHARACTER_SCALE),
-        int(c1_source_size[1] * BONDS_CHARACTER_SCALE),
-    )
-    c2_resize = (
-        int(c2_source_size[0] * BONDS_CHARACTER_SCALE),
-        int(c2_source_size[1] * BONDS_CHARACTER_SCALE),
-    )
-    c1_face = int((c1_source_size[0] // 2) * BONDS_CHARACTER_SCALE)
-    c2_face = int((c2_source_size[0] // 2) * BONDS_CHARACTER_SCALE)
+    scale = BONDS_MAIN_CHARACTER_SCALE if is_main_honor else BONDS_CHARACTER_SCALE
+    c1_resize = (int(c1_source_size[0] * scale), int(c1_source_size[1] * scale))
+    c2_resize = (int(c2_source_size[0] * scale), int(c2_source_size[1] * scale))
     middle = width // 2
-    offset = BONDS_MAIN_CHARACTER_OFFSET if is_main_honor else BONDS_SUB_CHARACTER_OFFSET
-    c1_face_x = middle - offset
-    c2_face_x = middle + offset
-    c1_origin = (c1_face_x - c1_face, height - c1_resize[1])
-    c2_origin = (c2_face_x - c2_face, height - c2_resize[1])
+    if is_main_honor:
+        bottom = height + BONDS_MAIN_CHARACTER_BOTTOM_OVERHANG
+        c1_origin = (0, bottom - c1_resize[1])
+        c2_origin = (width - c2_resize[0], bottom - c2_resize[1])
+    else:
+        c1_face = int((c1_source_size[0] // 2) * scale)
+        c2_face = int((c2_source_size[0] // 2) * scale)
+        c1_origin = (middle - BONDS_SUB_CHARACTER_OFFSET - c1_face, height - c1_resize[1])
+        c2_origin = (middle + BONDS_SUB_CHARACTER_OFFSET - c2_face, height - c2_resize[1])
 
     character_ops = (
         _image_op(
@@ -362,7 +365,8 @@ def build_bonds_honor_plan(
 __all__ = [
     "BONDS_BACKGROUND_CENTER_OVERLAP",
     "BONDS_CHARACTER_SCALE",
-    "BONDS_MAIN_CHARACTER_OFFSET",
+    "BONDS_MAIN_CHARACTER_BOTTOM_OVERHANG",
+    "BONDS_MAIN_CHARACTER_SCALE",
     "BONDS_SUB_CHARACTER_OFFSET",
     "BondsHonorPlan",
     "BondsImageTint",

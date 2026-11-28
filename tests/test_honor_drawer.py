@@ -180,7 +180,7 @@ def test_bonds_honor_background_uses_left_and_right_halves() -> None:
 
 
 def test_bonds_honor_places_faces_in_each_half_for_main_and_sub_slots() -> None:
-    for main, expected_left, expected_right in ((True, 70, 310), (False, 60, 120)):
+    for main, expected_left, expected_right in ((True, 80, 300), (False, 60, 120)):
         size = (380, 80) if main else (180, 80)
         image = compose_full_honor_image_from_loaded_assets(
             _bonds_request(main=main),
