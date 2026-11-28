@@ -37,13 +37,15 @@ def test_main_bonds_honor_plan_pins_full_resize_then_destination_clip_geometry()
 
     left = _op(plan, "character.left")
     right = _op(plan, "character.right")
-    assert left.full_resize_size == right.full_resize_size == (128, 108)
-    assert left.destination_offset == (6, -28)
-    assert right.destination_offset == (246, -28)
+    # Main badges match the CN client: native-size sprites flush with the badge's outer edges,
+    # bottoms 13 px below the badge (faces at x=80 / x=300).
+    assert left.full_resize_size == right.full_resize_size == (160, 136)
+    assert left.destination_offset == (0, -43)
+    assert right.destination_offset == (220, -43)
     assert left.destination_clip == (0, 0, 190, 80)
     assert right.destination_clip == (190, 0, 380, 80)
-    assert left.post_resize_crop_box == (0, 28, 128, 108)
-    assert right.post_resize_crop_box == (0, 28, 128, 108)
+    assert left.post_resize_crop_box == (0, 43, 160, 123)
+    assert right.post_resize_crop_box == (0, 43, 160, 123)
     assert left.sampling == right.sampling == "linear"
     assert left.blend == right.blend == "src_over"
 
